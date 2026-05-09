@@ -1,6 +1,5 @@
 import json
 import os
-import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -15,7 +14,7 @@ TOKEN = "8787041046:AAF8g2MD6fB-hhQ16oAdXl9XN5FQ7u4C0j8"
 ADMIN_ID = 8194390770
 BUTTONS_FILE = "buttons.json"
 
-# ---------- কালার → ইমোজি ম্যাপিং ----------
+# ---------- কালার ইমোজি ম্যাপিং ----------
 COLOR_MAP = {
     "red": ("#FF0000", "🟥"),
     "orange": ("#FFA500", "🟧"),
@@ -37,9 +36,8 @@ def color_distance(c1, c2):
     return sum((a - b) ** 2 for a, b in zip(c1, c2))
 
 def get_color_emoji(hex_color: str) -> str:
-    """হেক্স কালার থেকে নিকটতম রঙের স্কয়ার ইমোজি বের করে"""
     if not hex_color:
-        return "🔹"  # default
+        return "🔹"
     try:
         rgb = hex_to_rgb(hex_color)
     except:
@@ -47,7 +45,7 @@ def get_color_emoji(hex_color: str) -> str:
     closest = min(COLOR_MAP.values(), key=lambda x: color_distance(hex_to_rgb(x[0]), rgb))
     return closest[1]
 
-# ---------- JSON হেল্পার ----------
+# ---------- JSON helper ----------
 def load_buttons():
     if os.path.exists(BUTTONS_FILE):
         with open(BUTTONS_FILE, "r") as f:
@@ -58,17 +56,17 @@ def save_buttons(buttons):
     with open(BUTTONS_FILE, "w") as f:
         json.dump(buttons, f, indent=2)
 
-# ---------- কমান্ড ----------
+# ---------- /start handler ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = load_buttons()
     keyboard = []
-    for btn in buttons:
-        name = btn["name"]
-        color = btn.get("color")
-        emoji = get_color_emoji(color) if color else "🔹"
-        text = f"{emoji} {name}"
-        keyboard.append([InlineKeyboardButton(text=text, url=btn["url"])])
-
+    for idx, btn in enumerate(buttons):
+        emoji = get_color_emoji(btn.get("color"))
+        text = f"{emoji} {btn['name']}"
+        keyboard.append([InlineKeyboardButton(
+            text=text,
+            callback_data=f"open_{idx}"  # <-- মেইন ম্যাজিক
+        )])
     markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
     msg = (
@@ -76,25 +74,73 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "┌────────────────┐\n"
         "│ ▶️  টুল বক্সে স্বাগতম!  │\n"
         "└────────────────┘\n"
-        "নিচের বাটনে ক্লিক করে সরাসরি যাও 👇"
+        "নিচের বাটনে ক্লিক করলেই সরাসরি লিংক ওপেন হবে 👇"
     )
-
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=markup)
 
+# ---------- Callback handler (open ও remove দুটোর জন্য) ----------
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+
+    if data.startswith("open_"):
+        # বাটন ওপেন
+        await query.answer()  # লোডিং বন্ধ
+        try:
+            index = int(data.split("_")[1])
+        except:
+            await query.answer("ভুল ডাটা!", show_alert=True)
+            return
+        buttons = load_buttons()
+        if 0 <= index < len(buttons):
+            url = buttons[index]["url"]
+            # সরাসরি লিংক ওপেন, কোনো কনফার্মেশন নাই
+            await query.answer(url=url)
+        else:
+            await query.answer("বাটন খুঁজে পাইনি!", show_alert=True)
+
+    elif data.startswith("remove_"):
+        # শুধু অ্যাডমিন পারবে
+        if query.from_user.id != ADMIN_ID:
+            await query.answer("তুমি অ্যাডমিন না!", show_alert=True)
+            return
+        await query.answer()
+        try:
+            index = int(data.split("_")[1])
+        except:
+            await query.answer("ভুল!", show_alert=True)
+            return
+        buttons = load_buttons()
+        if 0 <= index < len(buttons):
+            removed = buttons.pop(index)
+            save_buttons(buttons)
+            emoji = get_color_emoji(removed.get("color"))
+            await query.answer(f"{emoji} {removed['name']} মুছে ফেলা হয়েছে", show_alert=False)
+            # ইনলাইন কি-বোর্ড আপডেট
+            new_buttons = load_buttons()
+            if new_buttons:
+                kb = []
+                for i, b in enumerate(new_buttons):
+                    e = get_color_emoji(b.get("color"))
+                    kb.append([InlineKeyboardButton(f"{e} {b['name']}", callback_data=f"remove_{i}")])
+                await query.edit_message_reply_markup(InlineKeyboardMarkup(kb))
+            else:
+                await query.edit_message_text("🧹 সব বাটন মুছে ফেলা হয়েছে!", reply_markup=None)
+        else:
+            await query.answer("বাটন নেই!", show_alert=True)
+
+# ---------- অ্যাডমিন কমান্ড: সেট / রিমুভ / ক্লিয়ার ----------
 async def set_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ তুমি অ্যাডমিন না, যাও ভাগ!")
+        await update.message.reply_text("❌ তুমি অ্যাডমিন না!")
         return
 
-    # ফরম্যাট: /set - নাম - লিংক - #কালার(optional)
     text = update.message.text.strip()
-    # রেজেক্স দিয়ে পার্স করা: /set - নাম - লিংক - #কালার? (কালার অপশনাল)
-    # সহজ ভাবে স্প্লিট দিয়ে করব
     parts = text.split(" - ", 3)
     if len(parts) < 3:
         await update.message.reply_text(
-            "❗ <b>নিয়ম:</b>\n<code>/set - নাম - লিংক - #কালার(optional)</code>\n"
-            "উদাহরণ: <code>/set - Google - https://google.com - #FF0000</code>",
+            "❗ <b>ফরম্যাট:</b>\n<code>/set - নাম - লিংক - #কালার</code> (কালার অপশনাল)\n"
+            "উদা: <code>/set - Google - https://google.com - #FF0000</code>",
             parse_mode=ParseMode.HTML
         )
         return
@@ -104,13 +150,13 @@ async def set_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     color = parts[3].strip() if len(parts) == 4 else None
 
     if not name or not url:
-        await update.message.reply_text("❌ নাম আর লিংক দিতেই হবে!")
+        await update.message.reply_text("❌ নাম আর লিংক দিতে হবে")
         return
     if not url.startswith(("http://", "https://")):
-        await update.message.reply_text("❌ লিংক http:// বা https:// দিয়ে শুরু হওয়া লাগবে!")
+        await update.message.reply_text("❌ লিংক http/https দিয়ে শুরু হওয়া লাগবে")
         return
     if color and not color.startswith("#"):
-        await update.message.reply_text("❌ কালার কোড # চিহ্ন দিয়ে শুরু হবে (যেমন #FF00FF)")
+        await update.message.reply_text("❌ কালার # দিয়ে শুরু হতে হবে")
         return
 
     buttons = load_buttons()
@@ -123,96 +169,42 @@ async def set_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML
     )
 
-async def remove_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """অ্যাডমিনের জন্য /remove কমান্ড, বাটন সিলেক্ট করে রিমুভ"""
+async def remove_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-
     buttons = load_buttons()
     if not buttons:
-        await update.message.reply_text("❌ রিমুভ করার মতো কোনো বাটন নাই!")
+        await update.message.reply_text("রিমুভ করার কোনো বাটন নাই!")
         return
-
-    keyboard = []
-    for idx, btn in enumerate(buttons):
-        name = btn["name"]
-        color = btn.get("color")
-        emoji = get_color_emoji(color) if color else "🔹"
-        text = f"{emoji} {name}"
-        # callback_data: remove_<index>
-        keyboard.append([InlineKeyboardButton(text=text, callback_data=f"remove_{idx}")])
-
-    markup = InlineKeyboardMarkup(keyboard)
+    kb = []
+    for i, b in enumerate(buttons):
+        e = get_color_emoji(b.get("color"))
+        kb.append([InlineKeyboardButton(f"{e} {b['name']}", callback_data=f"remove_{i}")])
     await update.message.reply_text(
-        "🗑️ <b>রিমুভ করতে কোনো বাটনে ক্লিক করুন:</b>",
+        "🗑️ <b>যে বাটন মুছতে চাও সেটাতে ক্লিক কর:</b>",
         parse_mode=ParseMode.HTML,
-        reply_markup=markup
+        reply_markup=InlineKeyboardMarkup(kb)
     )
-
-async def remove_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()  # লোডিং বন্ধ
-
-    user_id = query.from_user.id
-    if user_id != ADMIN_ID:
-        await query.answer("একশন অ্যালাউ নয়!", show_alert=True)
-        return
-
-    data = query.data
-    if not data.startswith("remove_"):
-        return
-
-    try:
-        index = int(data.split("_")[1])
-    except:
-        await query.answer("ভুল ইনডেক্স!", show_alert=True)
-        return
-
-    buttons = load_buttons()
-    if index < 0 or index >= len(buttons):
-        await query.answer("বাটন খুঁজে পাই নাই!", show_alert=True)
-        return
-
-    removed = buttons.pop(index)
-    save_buttons(buttons)
-
-    emoji = get_color_emoji(removed.get("color")) if removed.get("color") else "🔹"
-    await query.answer(f"{emoji} {removed['name']} রিমুভ করা হয়েছে!", show_alert=False)
-
-    # এখন একই মেসেজের বাটন লিস্ট আপডেট করা
-    new_buttons = load_buttons()
-    if new_buttons:
-        keyboard = []
-        for idx, btn in enumerate(new_buttons):
-            emoji = get_color_emoji(btn.get("color")) if btn.get("color") else "🔹"
-            text = f"{emoji} {btn['name']}"
-            keyboard.append([InlineKeyboardButton(text=text, callback_data=f"remove_{idx}")])
-        markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_reply_markup(reply_markup=markup)
-    else:
-        # সব রিমুভ হয়ে গেলে কি-বোর্ড মুছিয়ে মেসেজ আপডেট
-        await query.edit_message_text("🧹 সব বাটন রিমুভ হয়ে গেছে!", reply_markup=None)
 
 async def clear_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
     save_buttons([])
-    await update.message.reply_text("🧹 সব বাটন একসাথে ক্লিয়ার করা হয়েছে।")
+    await update.message.reply_text("🧹 সব বাটন সাফ করে দিয়েছি।")
 
 # ---------- মেইন ----------
 def main():
     app = Application.builder().token(TOKEN).build()
 
-    # কমান্ড হ্যান্ডলার
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("set", set_button))
-    app.add_handler(CommandHandler("remove", remove_buttons))
+    app.add_handler(CommandHandler("remove", remove_menu))
     app.add_handler(CommandHandler("clear", clear_buttons))
 
-    # কলব্যাক হ্যান্ডলার (remove_* প্যাটার্ন)
-    app.add_handler(CallbackQueryHandler(remove_button_callback, pattern=r"^remove_\d+$"))
+    # open_ এবং remove_ দুটোর জন্য কলব্যাক হ্যান্ডলার
+    app.add_handler(CallbackQueryHandler(button_callback, pattern=r"^(open_|remove_)\d+$"))
 
-    print("⚙️ Tool IO Box বট চলছে...")
+    print("✅ TOOL IO BOX বট রান করছে...")
     app.run_polling()
 
 if __name__ == "__main__":
